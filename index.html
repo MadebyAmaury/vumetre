@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vu-mètre Audio-Mixer</title>
+<!-- Vu-mètre en direct de la board Audio-Mixer-MIDI (firmware >= 1.3.0) par USB, via Web Serial.
+     Ouvrir dans Chrome ou Edge, cliquer « Connecter » et choisir le port de l'ESP32-S3.
+     Protocole : set stream_ms 30 -> lignes EVT LVL ; voir pi/PROTOCOLE_USB.md. -->
+<style>
+  :root {
+    --bg: #0e1014; --panel: #171a21; --line: #262a33; --text: #e6e8ec; --dim: #8a909c;
+    --green: #3ddc84; --yellow: #f5c542; --red: #ff4d4d; --accent: #4f8cff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+           padding: 14px 20px; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 17px; font-weight: 600; margin: 0 8px 0 0; }
+  button { background: var(--panel); color: var(--text); border: 1px solid var(--line);
+           border-radius: 8px; padding: 7px 14px; font: inherit; cursor: pointer; }
+  button:hover { border-color: #3a4050; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; }
+  .status { color: var(--dim); }
+  .status b { color: var(--text); font-weight: 600; }
+  .mode { margin-left: auto; padding: 6px 14px; border-radius: 999px; font-weight: 700;
+          letter-spacing: .04em; background: var(--panel); border: 1px solid var(--line); color: var(--dim); }
+  .mode.MUSIC { color: #0e1014; background: var(--green); border-color: var(--green); }
+  .mode.PUB { color: #0e1014; background: #ff9f43; border-color: #ff9f43; }
+  .mode.FADE_DOWN, .mode.FADE_UP { color: #0e1014; background: var(--yellow); border-color: var(--yellow); }
+
+  main { padding: 20px; display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+
+  .meters { display: flex; gap: 18px; justify-content: center; flex-wrap: wrap;
+            background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+  .group { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .group h2 { margin: 0; font-size: 13px; font-weight: 600; text-transform: uppercase;
+              letter-spacing: .1em; color: var(--dim); }
+  .pair { display: flex; gap: 8px; align-items: stretch; }
+  .scale { position: relative; width: 26px; height: var(--h); margin-top: 22px; }
+  .scale span { position: absolute; right: 0; transform: translateY(-50%); font-size: 10px;
+                color: var(--dim); font-variant-numeric: tabular-nums; }
+  .ch { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .led { width: 30px; height: 14px; border-radius: 4px; background: #2a1416; border: 1px solid #3b1d20;
+         cursor: pointer; transition: background .1s; }
+  .led.on { background: var(--red); border-color: var(--red); box-shadow: 0 0 10px var(--red); }
+  .track { --h: 360px; position: relative; width: 30px; height: var(--h); border-radius: 4px; overflow: hidden;
+           background: linear-gradient(to top, #12301f 0 70%, #3a3214 70% 90%, #3d1717 90%); }
+  .track .tick { position: absolute; left: 0; right: 0; height: 1px; background: rgba(0,0,0,.45); }
+  .fill { position: absolute; inset: 0;
+          background: linear-gradient(to top, var(--green) 0 70%, var(--yellow) 70% 90%, var(--red) 90%);
+          clip-path: inset(100% 0 0 0); }
+  .pk, .hold { position: absolute; left: 0; right: 0; height: 2px; bottom: 0; }
+  .pk { background: rgba(255,255,255,.85); }
+  .hold { background: #fff; height: 3px; box-shadow: 0 0 6px rgba(255,255,255,.6); }
+  .lbl { font-weight: 700; color: var(--dim); font-size: 12px; }
+  .num { font-variant-numeric: tabular-nums; font-size: 11px; text-align: center; color: var(--dim); width: 58px; white-space: nowrap; }
+  .num b { display: block; color: var(--text); font-size: 13px; font-weight: 600; }
+
+  .side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+  .card h3 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: .1em; color: var(--dim); }
+  .quick { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .quick button { padding: 4px 10px; font-size: 12px; }
+  form { display: flex; gap: 6px; }
+  input { flex: 1; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+          border-radius: 8px; padding: 7px 10px; font: 13px ui-monospace, Menlo, monospace; }
+  input:focus { outline: none; border-color: var(--accent); }
+  #log { margin-top: 10px; height: 340px; overflow: auto; background: var(--bg); border-radius: 8px;
+         padding: 8px 10px; font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+  #log .tx { color: var(--accent); }
+  #log .ok { color: var(--green); }
+  #log .err { color: var(--red); }
+  #log .evt { color: var(--yellow); }
+  #log .txt { color: var(--dim); }
+  .note { color: var(--dim); font-size: 12px; margin: 0; }
+  .warn { color: var(--yellow); }
+  label.chk { display: flex; gap: 6px; align-items: center; color: var(--dim); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Vu-mètre Audio-Mixer</h1>
+  <button id="connect" class="primary">Connecter</button>
+  <button id="resetPeaks" title="Remet à zéro les maintiens de crête et les voyants de saturation">Reset crêtes</button>
+  <span class="status" id="status">Non connecté</span>
+  <span class="mode" id="mode">—</span>
+</header>
+
+<main>
+  <section class="meters" id="meters"></section>
+  <aside class="side">
+    <div class="card">
+      <h3>Console</h3>
+      <div class="quick">
+        <button data-cmd="version">version</button>
+        <button data-cmd="sta">sta</button>
+        <button data-cmd="get">get</button>
+        <button data-cmd="mode">mode</button>
+        <button data-cmd="status">status</button>
+      </div>
+      <form id="form"><input id="cmd" placeholder="commande, ex. set music -6" autocomplete="off" spellcheck="false"><button>Envoyer</button></form>
+      <label class="chk"><input type="checkbox" id="showText" style="flex:0"> afficher aussi le texte non machine (aide, status…)</label>
+      <div id="log"></div>
+    </div>
+    <p class="note">Barre = RMS, trait fin = crête, trait épais = crête maintenue 2 s. Voyant rouge = saturation
+      (clic pour l'éteindre). Échelle en dBFS. <span id="support"></span></p>
+  </aside>
+</main>
+
+<script>
+const STREAM_MS = 30;
+const DB_MIN = -60;
+const HOLD_MS = 2000;
+const FALL_DB_S = 24;            // retombée des barres et des crêtes
+const TICKS = [0, -3, -6, -9, -12, -18, -24, -30, -40, -50, -60];
+const GROUPS = [["Musique", "ml", "mr"], ["Pub", "pl", "pr"], ["Sortie", "ol", "or"]];
+const INPUTS = ["ml", "mr", "pl", "pr"];
+
+// ---- Analyse des lignes (pure, testable) ----
+function parseLvl(line) {
+  if (!line.startsWith("EVT LVL ")) return null;
+  const out = { ch: {} };
+  for (const tok of line.slice(8).trim().split(/\s+/)) {
+    const [k, v] = tok.split("=");
+    if (v === undefined) continue;
+    if (v.includes("/")) {
+      const [pk, rms] = v.split("/").map(Number);
+      out.ch[k] = { pk, rms };
+    } else if (k === "mode") out.mode = v;
+    else if (k === "clip_in") out.clipIn = Number(v);
+    else if (k === "clip_out") out.clipOut = Number(v);
+  }
+  return out;
+}
+function lineKind(line) {
+  const head = line.split(" ", 1)[0];
+  if (head === "OK" || head === "CFG" || head === "STA" || head === "VER") return "ok";
+  if (head === "ERR") return "err";
+  if (head === "EVT") return "evt";
+  return "txt";
+}
+
+// ---- Construction de l'affichage ----
+const pct = db => Math.max(0, Math.min(1, (db - DB_MIN) / -DB_MIN));
+const meters = {};
+const metersEl = document.getElementById("meters");
+for (const [title, l, r] of GROUPS) {
+  const g = document.createElement("div");
+  g.className = "group";
+  g.innerHTML = `<h2>${title}</h2><div class="pair"></div>`;
+  const pair = g.querySelector(".pair");
+  const scale = document.createElement("div");
+  scale.className = "scale";
+  scale.style.setProperty("--h", "360px");
+  for (const t of TICKS) {
+    const s = document.createElement("span");
+    s.textContent = t;
+    s.style.top = (1 - pct(t)) * 100 + "%";
+    scale.append(s);
+  }
+  pair.append(scale);
+  for (const [key, side] of [[l, "G"], [r, "D"]]) {
+    const ch = document.createElement("div");
+    ch.className = "ch";
+    ch.innerHTML = `<div class="led" title="Saturation (clic pour éteindre)"></div>
+      <div class="track">${TICKS.slice(1, -1).map(t => `<div class="tick" style="bottom:${pct(t) * 100}%"></div>`).join("")}
+      <div class="fill"></div><div class="pk"></div><div class="hold"></div></div>
+      <div class="lbl">${side}</div>
+      <div class="num"><b class="vHold">-∞</b><span class="vRms">-∞</span></div>`;
+    pair.append(ch);
+    const m = { key, el: ch, rms: -99, pk: -99, hold: -99, holdT: 0, clip: false,
+                inRms: -99, inPk: -99,
+                fill: ch.querySelector(".fill"), pkEl: ch.querySelector(".pk"), holdEl: ch.querySelector(".hold"),
+                led: ch.querySelector(".led"), vHold: ch.querySelector(".vHold"), vRms: ch.querySelector(".vRms") };
+    m.led.onclick = () => { m.clip = false; m.hold = -99; };
+    meters[key] = m;
+  }
+  metersEl.append(g);
+}
+const fmt = db => db <= -99 ? "-∞" : db.toFixed(1);
+
+const modeEl = document.getElementById("mode");
+function setMode(m) {
+  modeEl.textContent = { MUSIC: "MUSIQUE", PUB: "PUB", FADE_DOWN: "FONDU → PUB", FADE_UP: "FONDU → MUSIQUE" }[m] || m;
+  modeEl.className = "mode " + m;
+}
+
+function applyLvl(d) {
+  const now = performance.now();
+  for (const [k, v] of Object.entries(d.ch)) {
+    const m = meters[k];
+    if (!m) continue;
+    m.inPk = v.pk; m.inRms = v.rms;
+    if (v.pk >= m.hold) { m.hold = v.pk; m.holdT = now; }
+    const clipped = INPUTS.includes(k) ? d.clipIn > 0 && v.pk >= -0.5 : d.clipOut > 0 && v.pk >= -0.5;
+    if (v.pk >= -0.1 || clipped) m.clip = true;
+  }
+  if (d.mode) setMode(d.mode);
+  lastLvl = now;
+}
+
+let lastFrame = performance.now(), lastLvl = 0;
+function frame(now) {
+  const dt = (now - lastFrame) / 1000;
+  lastFrame = now;
+  const fall = FALL_DB_S * dt;
+  const stale = now - lastLvl > 500;       // plus de données : les barres retombent
+  for (const m of Object.values(meters)) {
+    const tr = stale ? -99 : m.inRms, tp = stale ? -99 : m.inPk;
+    m.rms = tr >= m.rms ? tr : Math.max(tr, m.rms - fall);
+    m.pk = tp >= m.pk ? tp : Math.max(tp, m.pk - fall);
+    if (now - m.holdT > HOLD_MS) m.hold = Math.max(m.pk, m.hold - fall);
+    m.fill.style.clipPath = `inset(${(1 - pct(m.rms)) * 100}% 0 0 0)`;
+    m.pkEl.style.bottom = `calc(${pct(m.pk) * 100}% - 1px)`;
+    m.pkEl.style.opacity = m.pk > DB_MIN ? 1 : 0;
+    m.holdEl.style.bottom = `calc(${pct(m.hold) * 100}% - 1px)`;
+    m.holdEl.style.opacity = m.hold > DB_MIN ? 1 : 0;
+    m.holdEl.style.background = m.hold >= -6 ? "var(--red)" : m.hold >= -18 ? "var(--yellow)" : "#fff";
+    m.led.classList.toggle("on", m.clip);
+    m.vHold.textContent = fmt(m.hold);
+    m.vRms.textContent = "RMS " + fmt(m.rms);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+document.getElementById("resetPeaks").onclick = () => {
+  for (const m of Object.values(meters)) { m.clip = false; m.hold = -99; }
+};
+
+// ---- Journal ----
+const logEl = document.getElementById("log");
+const showText = document.getElementById("showText");
+function log(text, cls) {
+  const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 4;
+  const div = document.createElement("div");
+  div.className = cls;
+  div.textContent = text;
+  logEl.append(div);
+  while (logEl.childElementCount > 400) logEl.firstChild.remove();
+  if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ---- Liaison série (Web Serial) ----
+const statusEl = document.getElementById("status");
+const connectBtn = document.getElementById("connect");
+let port = null, writer = null, reader = null, closing = false, gotVer = false;
+
+function handleLine(line) {
+  const lvl = parseLvl(line);
+  if (lvl) return applyLvl(lvl);
+  const kind = lineKind(line);
+  if (line.startsWith("VER ")) {
+    gotVer = true;
+    statusEl.innerHTML = `Connecté · <b>${line.slice(4)}</b>`;
+  }
+  if (line.startsWith("EVT MODE ")) setMode(line.slice(9).trim());
+  if (line.startsWith("EVT READY")) {   // l'ESP a redémarré : le flux est revenu à 0
+    statusEl.innerHTML = `Connecté · <b>${line.slice(10)}</b>`;
+    send(`set stream_ms ${STREAM_MS}`, true);
+  }
+  if (kind !== "txt" || showText.checked) log(line, kind);
+}
+
+async function send(cmd, quiet) {
+  if (!writer) return;
+  if (!quiet) log("> " + cmd, "tx");
+  await writer.write(new TextEncoder().encode(cmd + "\n"));
+}
+
+async function readLoop() {
+  const dec = new TextDecoder();
+  let buf = "";
+  while (port && port.readable && !closing) {
+    reader = port.readable.getReader();
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, i).replace(/\r$/, "");
+          buf = buf.slice(i + 1);
+          if (line) handleLine(line);
+        }
+      }
+    } catch (e) {
+      if (!closing) log("Liaison perdue : " + e.message, "err");
+    } finally {
+      reader.releaseLock();
+      reader = null;
+    }
+    if (!closing) break;
+  }
+  if (!closing) disconnect(false);
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function openAndHandshake(p) {
+  // DTR/RTS laissés par défaut (les forcer à 0 redémarre l'ESP)
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    await p.open({ baudRate: 115200 });
+    port = p;
+    writer = p.writable.getWriter();
+    closing = false;
+    gotVer = false;
+    readLoop();
+    await send("version", true);
+    for (let t = 0; t < 20 && !gotVer; t++) await sleep(50);
+    if (gotVer) return true;
+    // protocole : sans VER sous 1 s, fermer et rouvrir
+    await closePort();
+    await sleep(300);
+  }
+  return false;
+}
+
+async function closePort() {
+  closing = true;
+  try { if (reader) await reader.cancel(); } catch {}
+  try { if (writer) { writer.releaseLock(); } } catch {}
+  writer = null;
+  for (let t = 0; t < 20 && reader; t++) await sleep(10);
+  try { if (port) await port.close(); } catch {}
+}
+
+async function connect() {
+  if (!("serial" in navigator)) return alert("Ce navigateur ne gère pas Web Serial : ouvrir la page dans Chrome ou Edge.");
+  let p;
+  try {
+    p = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x303A }] });
+  } catch { return; }             // fenêtre de choix fermée
+  connectBtn.disabled = true;
+  statusEl.textContent = "Connexion…";
+  try {
+    if (!(await openAndHandshake(p))) {
+      statusEl.innerHTML = `<span class="warn">La board ne répond pas (pas de VER). Port occupé par une autre appli ?</span>`;
+      port = null;
+      connectBtn.disabled = false;
+      return;
+    }
+  } catch (e) {
+    statusEl.innerHTML = `<span class="warn">Ouverture impossible : ${e.message}. Port déjà ouvert ailleurs (moniteur série, logger) ?</span>`;
+    port = null;
+    connectBtn.disabled = false;
+    return;
+  }
+  await send(`set stream_ms ${STREAM_MS}`, true);
+  await send("mode", true);
+  connectBtn.textContent = "Déconnecter";
+  connectBtn.classList.remove("primary");
+  connectBtn.disabled = false;
+}
+
+async function disconnect(graceful = true) {
+  if (graceful && writer) {
+    try { await send("set stream_ms 0", true); await sleep(80); } catch {}
+  }
+  await closePort();
+  port = null;
+  statusEl.textContent = "Non connecté";
+  setMode("—");
+  modeEl.className = "mode";
+  connectBtn.textContent = "Connecter";
+  connectBtn.classList.add("primary");
+  connectBtn.disabled = false;
+}
+
+connectBtn.onclick = () => (port ? disconnect() : connect());
+document.getElementById("form").onsubmit = e => {
+  e.preventDefault();
+  const input = document.getElementById("cmd");
+  const cmd = input.value.trim();
+  if (!cmd) return;
+  if (!writer) return log("Non connecté", "err");
+  send(cmd);
+  input.value = "";
+};
+for (const b of document.querySelectorAll("[data-cmd]"))
+  b.onclick = () => (writer ? send(b.dataset.cmd) : log("Non connecté", "err"));
+
+// Fermeture de l'onglet : on coupe le flux au mieux
+window.addEventListener("pagehide", () => { if (writer) writer.write(new TextEncoder().encode("set stream_ms 0\n")); });
+if ("serial" in navigator) {
+  navigator.serial.addEventListener("disconnect", e => {
+    if (port && e.target === port) { log("Board débranchée", "err"); disconnect(false); }
+  });
+} else {
+  document.getElementById("support").innerHTML =
+    '<span class="warn">Ce navigateur ne gère pas Web Serial : utiliser Chrome ou Edge.</span>';
+}
+</script>
+</body>
+</html>
